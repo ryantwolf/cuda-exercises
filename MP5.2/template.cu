@@ -18,11 +18,69 @@
     }                                                                     \
   } while (0)
 
-__global__ void scan(float *input, float *output, int len) {
+__global__ void addAux(float *main, float *aux, int len) {
+  int first = 2 * (blockIdx.x + 1) * BLOCK_SIZE + threadIdx.x;
+  int second = first + BLOCK_SIZE;
+  if (first < len) {
+    main[first] += aux[blockIdx.x];
+  }
+  if (second < len) {
+    main[second] += aux[blockIdx.x];
+  }
+}
+
+__global__ void scan(float *input, float *output, float* aux, int len) {
   //@@ Modify the body of this function to complete the functionality of
   //@@ the scan on the device
   //@@ You may need multiple kernel calls; write your kernels before this
   //@@ function and call them from the host
+  __shared__ float T[2 * BLOCK_SIZE];
+
+  int first_load = 2 * blockIdx.x * blockDim.x + threadIdx.x;
+  if (first_load < len) {
+    T[threadIdx.x] = input[first_load];
+  } else {
+    T[threadIdx.x] = 0;
+  }
+
+  int second_load = 2 * blockIdx.x * blockDim.x + blockDim.x + threadIdx.x;
+  if (second_load < len) {
+    T[blockDim.x + threadIdx.x] = input[second_load];
+  } else {
+    T[blockDim.x + threadIdx.x] = 0;
+  }
+
+  int stride = 1;
+  while (stride < 2 * BLOCK_SIZE) {
+    __syncthreads();
+    int index = (threadIdx.x + 1) * stride * 2 - 1;
+    if (index < 2 * BLOCK_SIZE && (index - stride) >= 0) {
+      T[index] += T[index - stride];
+    }
+    stride *= 2;
+  }
+
+  stride = BLOCK_SIZE / 2;
+  while (stride > 0) {
+    __syncthreads();
+    int index = (threadIdx.x + 1) * stride * 2 - 1;
+    if (index + stride < 2 * BLOCK_SIZE) {
+      T[index + stride] += T[index];
+    }
+    stride /= 2;
+  }
+
+  __syncthreads();
+  if (first_load < len) {
+    output[first_load] = T[threadIdx.x];
+  }
+  if (second_load < len) {
+    output[second_load] = T[blockDim.x + threadIdx.x];
+  }
+
+  if (threadIdx.x == BLOCK_SIZE - 1 && aux != NULL) {
+    aux[blockIdx.x] = T[2 * BLOCK_SIZE - 1];
+  }
 }
 
 int main(int argc, char **argv) {
@@ -58,10 +116,19 @@ int main(int argc, char **argv) {
   wbTime_stop(GPU, "Copying input memory to the GPU.");
 
   //@@ Initialize the grid and block dimensions here
+  dim3 DimGrid(ceil(numElements / (2.0 * BLOCK_SIZE)), 1, 1);
+  dim3 DimBlock(BLOCK_SIZE, 1, 1);
 
   wbTime_start(Compute, "Performing CUDA computation");
   //@@ Modify this to complete the functionality of the scan
   //@@ on the deivce
+
+  // Create aux block sum array
+  float *aux_block_sum;
+  cudaMalloc((void **)&aux_block_sum, DimGrid.x * sizeof(float));
+  scan<<<DimGrid, DimBlock>>>(deviceInput, deviceOutput, aux_block_sum, numElements);
+  scan<<<dim3(1, 1, 1), DimBlock>>>(aux_block_sum, aux_block_sum, NULL, DimGrid.x);
+  addAux<<<DimGrid, DimBlock>>>(deviceOutput, aux_block_sum, numElements);
 
   cudaDeviceSynchronize();
   wbTime_stop(Compute, "Performing CUDA computation");
@@ -69,11 +136,16 @@ int main(int argc, char **argv) {
   wbTime_start(Copy, "Copying output memory to the CPU");
   wbCheck(cudaMemcpy(hostOutput, deviceOutput, numElements * sizeof(float),
                      cudaMemcpyDeviceToHost));
+  // Print output
+  // for (int i = 0; i < numElements; i++) {
+  //   printf("%f ", hostOutput[i]);
+  // }
   wbTime_stop(Copy, "Copying output memory to the CPU");
 
   wbTime_start(GPU, "Freeing GPU Memory");
   cudaFree(deviceInput);
   cudaFree(deviceOutput);
+  cudaFree(aux_block_sum);
   wbTime_stop(GPU, "Freeing GPU Memory");
 
   wbSolution(args, hostOutput, numElements);

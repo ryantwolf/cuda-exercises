@@ -5,7 +5,7 @@
 
 // __constant__ float cMask[3136];
 
-// #define STREAMS
+#define STREAMS
 
 #define ROWS_A 64
 #define COLS_B 32
@@ -158,7 +158,7 @@ __global__ void mask_conv_forward_kernel(float* __restrict__ output, const float
 #undef ROWS_B
 
 
-#define COLS_B 64
+#define COLS_B 128
 #define ROWS_A 16
 #define COLS_A (COLS_B / ROWS_A)
 
@@ -170,29 +170,24 @@ __global__ void mask_conv_forward_kernel(float* __restrict__ output, const float
 __global__ void conv_forward_kernel(float* __restrict__ output, const float* __restrict__ input, const float* __restrict__ mask, const int Batch, const int Map_out, const int Channel, const int Height, const int Width, const int K)
 {
     /*
-    Modify this function to implement the forward pass described in Chapter 16.
-    We have added an additional dimension to the tensors to support an entire mini-batch
-    The goal here is to be correct AND fast.
+        Modify this function to implement the forward pass described in Chapter 16.
+        We have added an additional dimension to the tensors to support an entire mini-batch
+        The goal here is to be correct AND fast.
 
-    Function paramter definitions:
-    output - output
-    input - input
-    mask - convolution kernel
-    Batch - batch_size (number of images in x)
-    Map_out - number of output feature maps
-    Channel - number of input feature maps
-    Height - input height dimension
-    Width - input width dimension
-    K - kernel height and width (K x K)
+        Function paramter definitions:
+        output - output
+        input - input
+        mask - convolution kernel
+        Batch - batch_size (number of images in x)
+        Map_out - number of output feature maps
+        Channel - number of input feature maps
+        Height - input height dimension
+        Width - input width dimension
+        K - kernel height and width (K x K)
     */
 
     const int Height_out = Height - K + 1;
     const int Width_out = Width - K + 1;
-
-    // We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
-    // An example use of these macros:
-    // float a = in_4d(0,0,0,0)
-    // out_4d(0,0,0,0) = a
 
     #define out_4d(i3, i2, i1, i0) output[(i3) * (Map_out * Height_out * Width_out) + (i2) * (Height_out * Width_out) + (i1) * (Width_out) + i0]
     #define in_4d(i3, i2, i1, i0) input[(i3) * (Channel * Height * Width) + (i2) * (Height * Width) + (i1) * (Width) + i0]
@@ -214,7 +209,8 @@ __global__ void conv_forward_kernel(float* __restrict__ output, const float* __r
 
     const unsigned int M = Map_out;
     const unsigned int N = Height_out * Width_out;
-    const unsigned int L = K * K * Channel;
+    const unsigned int K_squared = K * K;
+    const unsigned int L = K_squared * Channel;
 
     __shared__ __half2 sA[ROWS_A][COLS_A / 2];
 
@@ -263,22 +259,24 @@ __global__ void conv_forward_kernel(float* __restrict__ output, const float* __r
             if (col < N) {
                 unsigned int unrolled_i = tile * COLS_A + 2 * idx;
                 unsigned int unrolled_j = col;
-                unsigned int h = unrolled_j / Width_out;
+                unsigned int h = __float2uint_rd((float) unrolled_j / Width_out);
                 unsigned int w = unrolled_j % Width_out;
                 if (unrolled_i < L && unrolled_j < N) {
                     // Figure out which feature we are loading
-                    unsigned int feature = unrolled_i / (K * K);
+                    unsigned int feature = __float2uint_rd((float) unrolled_i / K_squared);
                     // Figure out which row and column we are loading
-                    unsigned int p = (unrolled_i % (K * K)) / K;
-                    unsigned int q = (unrolled_i % (K * K)) % K;
+                    unsigned int inter = unrolled_i % K_squared;
+                    unsigned int p = inter / K;
+                    unsigned int q = inter % K;
                     first = in_4d(blockIdx.z, feature, h + p, w + q);
                 }
                 if (++unrolled_i < L && unrolled_j < N) {
                     // Figure out which feature we are loading
-                    unsigned int feature = unrolled_i / (K * K);
+                    unsigned int feature = unrolled_i / K_squared;
                     // Figure out which row and column we are loading
-                    unsigned int p = (unrolled_i % (K * K)) / K;
-                    unsigned int q = (unrolled_i % (K * K)) % K;
+                    unsigned int inter = unrolled_i % K_squared;
+                    unsigned int p = inter / K;
+                    unsigned int q = inter % K;
                     second = in_4d(blockIdx.z, feature, h + p, w + q);
                 }
             }
@@ -388,7 +386,7 @@ __global__ void float_conv_forward_kernel(float* __restrict__ output, const floa
     #undef mask_4d
 }
 
-#define SMALL_COLS_B 64
+#define SMALL_COLS_B 128
 #define SMALL_ROWS_A 4
 #define SMALL_COLS_A (SMALL_COLS_B / SMALL_ROWS_A)
 
@@ -420,11 +418,6 @@ __global__ void small_conv_forward_kernel(float* __restrict__ output, const floa
     const int Height_out = Height - K + 1;
     const int Width_out = Width - K + 1;
 
-    // We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
-    // An example use of these macros:
-    // float a = in_4d(0,0,0,0)
-    // out_4d(0,0,0,0) = a
-
     #define out_4d(i3, i2, i1, i0) output[(i3) * (Map_out * Height_out * Width_out) + (i2) * (Height_out * Width_out) + (i1) * (Width_out) + i0]
     #define in_4d(i3, i2, i1, i0) input[(i3) * (Channel * Height * Width) + (i2) * (Height * Width) + (i1) * (Width) + i0]
     #define mask_4d(i3, i2, i1, i0) mask[(i3) * (Channel * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
@@ -445,7 +438,8 @@ __global__ void small_conv_forward_kernel(float* __restrict__ output, const floa
 
     const unsigned int M = Map_out;
     const unsigned int N = Height_out * Width_out;
-    const unsigned int L = K * K * Channel;
+    const unsigned int K_squared = K * K;
+    const unsigned int L = K_squared * Channel;
 
     __shared__ __half2 sA[SMALL_ROWS_A][SMALL_COLS_A / 2];
 
@@ -498,18 +492,20 @@ __global__ void small_conv_forward_kernel(float* __restrict__ output, const floa
                 unsigned int w = unrolled_j % Width_out;
                 if (unrolled_i < L && unrolled_j < N) {
                     // Figure out which feature we are loading
-                    unsigned int feature = unrolled_i / (K * K);
+                    unsigned int feature = unrolled_i / K_squared;
                     // Figure out which row and column we are loading
-                    unsigned int p = (unrolled_i % (K * K)) / K;
-                    unsigned int q = (unrolled_i % (K * K)) % K;
+                    unsigned int inter = unrolled_i % K_squared;
+                    unsigned int p = inter / K;
+                    unsigned int q = inter % K;
                     first = in_4d(blockIdx.z, feature, h + p, w + q);
                 }
                 if (++unrolled_i < L && unrolled_j < N) {
                     // Figure out which feature we are loading
-                    unsigned int feature = unrolled_i / (K * K);
+                    unsigned int feature = unrolled_i / K_squared;
                     // Figure out which row and column we are loading
-                    unsigned int p = (unrolled_i % (K * K)) / K;
-                    unsigned int q = (unrolled_i % (K * K)) % K;
+                    unsigned int inter = unrolled_i % K_squared;
+                    unsigned int p = inter / K;
+                    unsigned int q = inter % K;
                     second = in_4d(blockIdx.z, feature, h + p, w + q);
                 }
             }
@@ -532,6 +528,98 @@ __global__ void small_conv_forward_kernel(float* __restrict__ output, const floa
             out_4d(blockIdx.z, unrolled_i, col / Width_out, col % Width_out) = result.x + result.y;
         }
     }
+
+    #undef out_4d
+    #undef in_4d
+    #undef mask_4d
+}
+
+#define INPUT_TILE_SIZE 16
+#define KERNEL_SIZE 7
+#define OUTPUT_TILE_SIZE (INPUT_TILE_SIZE - KERNEL_SIZE + 1)
+__global__ void tiled_conv_forward_kernel(float* __restrict__ output, const float* __restrict__ input, const float* __restrict__ mask, const int Batch, const int Map_out, const int Channel, const int Height, const int Width, const int K) {
+    /*
+        Modify this function to implement the forward pass described in Chapter 16.
+        We have added an additional dimension to the tensors to support an entire mini-batch
+        The goal here is to be correct AND fast.
+
+        Function paramter definitions:
+        output - output
+        input - input
+        mask - convolution kernel
+        Batch - batch_size (number of images in x)
+        Map_out - number of output feature maps
+        Channel - number of input feature maps
+        Height - input height dimension
+        Width - input width dimension
+        K - kernel height and width (K x K)
+    */
+
+    // Insert your GPU convolution kernel code here
+    // The output matrix will be size Map_out x (Height_out * Width_out)
+    // - In the first layer, it is 4 x 6400
+    // - In the second layer, it is 16 x 1156
+    // The first input matrix will be size Map_out x (K * K * Channel) (M x L)
+    // - In the first layer, it is 4 x 49
+    // - In the second layer, it is 16 x 196
+    // The second input matrix will be size (K * K * Channel) x (Height_out * Width_out) (L x N)
+    // - In the first layer, it is 49 x 6400
+    // - In the second layer, it is 196 x 1156
+    // blockIdx.z will be the batch index
+    // blockIdx.x and blockIdx.y will be the normal tiling of the output matrix
+    // threadIdx.x will be the normal tiling of the output matrix within a tile
+
+    // Image dimensions: 86 x 86 and 80 x 80
+    // Mask dimensions: 4 1 7 7
+    // Image dimensions: 40 x 40 and 34 x 34
+    // Mask dimensions: 16 4 7 7
+
+    const int Height_out = Height - K + 1;
+    const int Width_out = Width - K + 1;
+
+    #define out_4d(i3, i2, i1, i0) output[(i3) * (Map_out * Height_out * Width_out) + (i2) * (Height_out * Width_out) + (i1) * (Width_out) + i0]
+    #define in_4d(i3, i2, i1, i0) input[(i3) * (Channel * Height * Width) + (i2) * (Height * Width) + (i1) * (Width) + i0]
+    #define mask_4d(i3, i2, i1, i0) mask[(i3) * (Channel * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+
+    const unsigned int W_grid = ceil(1.0 * Width_out / OUTPUT_TILE_SIZE);
+    const unsigned int m = blockIdx.x;
+    const unsigned int tx = threadIdx.x;
+    const unsigned int ty = threadIdx.y;
+    const int h = (blockIdx.y / W_grid) * OUTPUT_TILE_SIZE + ty;
+    const int w = (blockIdx.y % W_grid) * OUTPUT_TILE_SIZE + tx;
+    const unsigned int b = blockIdx.z;
+    
+
+    __shared__ float sA[INPUT_TILE_SIZE][INPUT_TILE_SIZE];
+
+    float acc = 0.0f;
+    // for (int c = 0; c < Channel; c++) {
+        // Load the tile of the image into shared memory
+        if (h < Height && w < Width) {
+            sA[ty][tx] = in_4d(b, 0, h, w);
+        } else {
+            sA[ty][tx] = 0.0;
+        }
+
+        __syncthreads();
+
+        if (ty < OUTPUT_TILE_SIZE && tx < OUTPUT_TILE_SIZE) {
+            for (int p = 0; p < K; p++) {
+                for (int q = 0; q < K; q++) {
+                    acc += sA[ty + p][tx + q] * mask_4d(m, 0, p, q);
+                }
+            }
+
+            if (h < Height_out && w < Width_out) {
+                out_4d(b, m, h, w) = acc;
+            }
+        }
+        // __syncthreads();
+    // }
+
+    // if (h < Height_out && w < Width_out && ty < OUTPUT_TILE_SIZE && tx < OUTPUT_TILE_SIZE) {
+    //     out_4d(b, m, h, w) = acc;
+    // }
 
     #undef out_4d
     #undef in_4d
@@ -635,9 +723,17 @@ __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, co
     int m = Map_out;
     int n = Height_out * Width_out;
     if (m < ROWS_A) {
-        dim3 dimGrid((m + SMALL_ROWS_A - 1) / SMALL_ROWS_A, (n + SMALL_COLS_B - 1) / SMALL_COLS_B, chunk_size);
-        dim3 dimBlock(1, SMALL_COLS_B, 1);
-        small_conv_forward_kernel<<<dimGrid, dimBlock, 0, streams[0]>>>(*device_output_ptr, *device_input_ptr, *device_mask_ptr, chunk_size, Map_out, Channel, Height, Width, K);
+        const int W_grid = ceil(1.0 * Width_out / TILE_WIDTH);
+        const int H_grid = ceil(1.0 * Height_out / TILE_WIDTH);
+        dim3 dimGrid(Map_out, W_grid * H_grid, chunk_size);
+        dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
+        // Print out the mask dimensions
+        // 16 4 7 7 = 3136
+        // printf("Mask dimensions: %d %d %d %d\n", Map_out, Channel, K, K);
+        old_conv_forward_kernel<<<dimGrid, dimBlock>>>(*device_output_ptr, *device_output_ptr, *device_mask_ptr, chunk_size, Map_out, Channel, Height, Width, K);
+        // dim3 dimGrid((m + SMALL_ROWS_A - 1) / SMALL_ROWS_A, (n + SMALL_COLS_B - 1) / SMALL_COLS_B, chunk_size);
+        // dim3 dimBlock(1, SMALL_COLS_B, 1);
+        // small_conv_forward_kernel<<<dimGrid, dimBlock, 0, streams[0]>>>(*device_output_ptr, *device_input_ptr, *device_mask_ptr, chunk_size, Map_out, Channel, Height, Width, K);
         cudaMemcpyAsync((float *) host_output, *device_output_ptr, full_output_size, cudaMemcpyDeviceToHost, streams[0]);
 
         for (int i = chunk_size; i < Batch; i += 3 * chunk_size) {
@@ -652,9 +748,13 @@ __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, co
             cudaMemcpyAsync(second_dev_input, host_input + (i + chunk_size) * image_size, full_input_size, cudaMemcpyHostToDevice, streams[1]);
             cudaMemcpyAsync(third_dev_input, host_input + (i + 2 * chunk_size) * image_size, full_input_size, cudaMemcpyHostToDevice, streams[2]);
             
-            small_conv_forward_kernel<<<dimGrid, dimBlock, 0, streams[0]>>>(first_dev_output, first_dev_input, *device_mask_ptr, chunk_size, Map_out, Channel, Height, Width, K);
-            small_conv_forward_kernel<<<dimGrid, dimBlock, 0, streams[1]>>>(second_dev_output, second_dev_input, *device_mask_ptr, chunk_size, Map_out, Channel, Height, Width, K);
-            small_conv_forward_kernel<<<dimGrid, dimBlock, 0, streams[2]>>>(third_dev_output, third_dev_input, *device_mask_ptr, chunk_size, Map_out, Channel, Height, Width, K);
+            // small_conv_forward_kernel<<<dimGrid, dimBlock, 0, streams[0]>>>(first_dev_output, first_dev_input, *device_mask_ptr, chunk_size, Map_out, Channel, Height, Width, K);
+            // small_conv_forward_kernel<<<dimGrid, dimBlock, 0, streams[1]>>>(second_dev_output, second_dev_input, *device_mask_ptr, chunk_size, Map_out, Channel, Height, Width, K);
+            // small_conv_forward_kernel<<<dimGrid, dimBlock, 0, streams[2]>>>(third_dev_output, third_dev_input, *device_mask_ptr, chunk_size, Map_out, Channel, Height, Width, K);
+
+            old_conv_forward_kernel<<<dimGrid, dimBlock, 0, streams[0]>>>(first_dev_output, first_dev_input, *device_mask_ptr, chunk_size, Map_out, Channel, Height, Width, K);
+            old_conv_forward_kernel<<<dimGrid, dimBlock, 0, streams[1]>>>(second_dev_output, second_dev_input, *device_mask_ptr, chunk_size, Map_out, Channel, Height, Width, K);
+            old_conv_forward_kernel<<<dimGrid, dimBlock, 0, streams[2]>>>(third_dev_output, third_dev_input, *device_mask_ptr, chunk_size, Map_out, Channel, Height, Width, K);
 
             cudaMemcpyAsync((float *) host_output + i * output_size, first_dev_output, full_output_size, cudaMemcpyDeviceToHost, streams[0]);
             cudaMemcpyAsync((float *) host_output + (i + chunk_size) * output_size, second_dev_output, full_output_size, cudaMemcpyDeviceToHost, streams[1]);
@@ -728,6 +828,24 @@ __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, co
 #endif
 
 /*
+    Competition tiled shared memory
+*/
+// __host__ void GPUInterface::conv_forward_gpu(float *device_output, const float *device_input, const float *device_mask, const int Batch, const int Map_out, const int Channel, const int Height, const int Width, const int K)
+// {
+//     // Set the kernel dimensions and call the kernel
+//     const int Height_out = Height - K + 1;
+//     const int Width_out = Width - K + 1;
+//     const int W_grid = ceil(1.0 * Width_out / TILE_WIDTH);
+//     const int H_grid = ceil(1.0 * Height_out / TILE_WIDTH);
+//     dim3 dimGrid(Map_out, W_grid * H_grid, Batch);
+//     dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
+//     // Print out the mask dimensions
+//     // 16 4 7 7 = 3136
+//     // printf("Mask dimensions: %d %d %d %d\n", Map_out, Channel, K, K);
+//     conv_forward_kernel<<<dimGrid, dimBlock>>>(device_output, device_input, device_mask, Batch, Map_out, Channel, Height, Width, K);
+// }
+
+/*
     ====================================
     The Checkpoint 3 version of conv_forward with mask shared memory and different kernels for layers
     with varying streams
@@ -755,11 +873,24 @@ __host__ void GPUInterface::conv_forward_gpu(float* __restrict__ device_output, 
     int m = Map_out;
     int n = Height_out * Width_out;
     if (m < ROWS_A) {
-        dim3 dimGrid((m + SMALL_ROWS_A - 1) / SMALL_ROWS_A, (n + SMALL_COLS_B - 1) / SMALL_COLS_B, Batch);
-        dim3 dimBlock(1, SMALL_COLS_B, 1);
-        // printf("Image dimensions: %d x %d and %d x %d\n", Height, Width, Height_out, Width_out);
+        const int W_grid = ceil(1.0 * Width_out / TILE_WIDTH);
+        const int H_grid = ceil(1.0 * Height_out / TILE_WIDTH);
+        dim3 dimGrid(Map_out, W_grid * H_grid, Batch);
+        dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
+        // Print out the mask dimensions
+        // 16 4 7 7 = 3136
         // printf("Mask dimensions: %d %d %d %d\n", Map_out, Channel, K, K);
-        small_conv_forward_kernel<<<dimGrid, dimBlock>>>(device_output, device_input, device_mask, Batch, Map_out, Channel, Height, Width, K);
+        old_conv_forward_kernel<<<dimGrid, dimBlock>>>(device_output, device_input, device_mask, Batch, Map_out, Channel, Height, Width, K);
+        // const int W_grid = ceil(1.0 * Width_out / OUTPUT_TILE_SIZE);
+        // const int H_grid = ceil(1.0 * Height_out / OUTPUT_TILE_SIZE);
+        // dim3 dimGrid(Map_out, W_grid * H_grid, Batch);
+        // dim3 dimBlock(INPUT_TILE_SIZE, INPUT_TILE_SIZE, 1);
+        // tiled_conv_forward_kernel<<<dimGrid, dimBlock>>>(device_output, device_input, device_mask, Batch, Map_out, Channel, Height, Width, K);
+        // dim3 dimGrid((m + SMALL_ROWS_A - 1) / SMALL_ROWS_A, (n + SMALL_COLS_B - 1) / SMALL_COLS_B, Batch);
+        // dim3 dimBlock(1, SMALL_COLS_B, 1);
+        // // printf("Image dimensions: %d x %d and %d x %d\n", Height, Width, Height_out, Width_out);
+        // // printf("Mask dimensions: %d %d %d %d\n", Map_out, Channel, K, K);
+        // small_conv_forward_kernel<<<dimGrid, dimBlock>>>(device_output, device_input, device_mask, Batch, Map_out, Channel, Height, Width, K);
     } else {
         dim3 dimGrid((m + ROWS_A - 1) / ROWS_A, (n + COLS_B - 1) / COLS_B, Batch);
         dim3 dimBlock(1, COLS_B, 1);
